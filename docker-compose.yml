@@ -1,0 +1,172 @@
+version: '3.8'
+
+services:
+  # PostgreSQL数据库
+  postgres:
+    image: postgres:15-alpine
+    container_name: oei-postgres
+    environment:
+      POSTGRES_DB: oei_ms
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres123
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    networks:
+      - oei-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d oei_ms"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis缓存
+  redis:
+    image: redis:7-alpine
+    container_name: oei-redis
+    command: redis-server --appendonly yes --requirepass redis123
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - oei-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redis123", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # MQTT Broker (Eclipse Mosquitto)
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: oei-mosquitto
+    volumes:
+      - ./mosquitto/config:/mosquitto/config:ro
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    networks:
+      - oei-network
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_pub -h localhost -t test -m 'health check' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # 后端API服务
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: oei-backend
+    environment:
+      # 数据库配置
+      DATABASE_URL: postgresql://postgres:postgres123@postgres:5432/oei_ms
+      
+      # Redis配置
+      REDIS_URL: redis://:redis123@redis:6379/0
+      
+      # MQTT配置
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 1883
+      MQTT_USERNAME: ""
+      MQTT_PASSWORD: ""
+      MQTT_KEEPALIVE: 60
+      
+      # 服务器配置
+      HOST: 0.0.0.0
+      PORT: 8000
+      DEBUG: false
+      
+      # WebSocket配置
+      WEBSOCKET_PING_INTERVAL: 20
+      WEBSOCKET_PING_TIMEOUT: 10
+      
+      # JWT配置
+      SECRET_KEY: your-secret-key-change-in-production
+      ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 30
+      
+      # 其他配置
+      CORS_ORIGINS: http://localhost:3000,http://localhost:80
+    volumes:
+      - ./backend/logs:/app/logs
+    ports:
+      - "8000:8000"
+    networks:
+      - oei-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mosquitto:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+  # 前端Web服务
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: oei-frontend
+    ports:
+      - "80:80"
+    networks:
+      - oei-network
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # 数据采集模拟器（可选）
+  data-simulator:
+    build:
+      context: ./simulator
+      dockerfile: Dockerfile
+    container_name: oei-simulator
+    environment:
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 1883
+      SIMULATION_INTERVAL: 5
+      SENSOR_COUNT: 10
+    networks:
+      - oei-network
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles:
+      - simulator
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  oei-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

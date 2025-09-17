@@ -1,0 +1,211 @@
+version: '3.8'
+
+# 开发环境Docker Compose配置
+# 使用方法: docker-compose -f docker-compose.dev.yml up
+
+services:
+  # PostgreSQL数据库
+  postgres:
+    image: postgres:15-alpine
+    container_name: oei-postgres-dev
+    environment:
+      POSTGRES_DB: oei_ms_dev
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres123
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+      - ./backend/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5433:5432"  # 避免与本地PostgreSQL冲突
+    networks:
+      - oei-dev-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d oei_ms_dev"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis缓存
+  redis:
+    image: redis:7-alpine
+    container_name: oei-redis-dev
+    command: redis-server --appendonly yes --requirepass redis123
+    volumes:
+      - redis_dev_data:/data
+    ports:
+      - "6380:6379"  # 避免与本地Redis冲突
+    networks:
+      - oei-dev-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redis123", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # MQTT Broker
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: oei-mosquitto-dev
+    volumes:
+      - ./mosquitto/config:/mosquitto/config:ro
+      - mosquitto_dev_data:/mosquitto/data
+      - mosquitto_dev_log:/mosquitto/log
+    ports:
+      - "1884:1883"  # 避免与本地MQTT冲突
+      - "9002:9001"  # WebSocket端口
+    networks:
+      - oei-dev-network
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_pub -h localhost -t test -m 'health check' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # 后端API服务（开发模式）
+  backend-dev:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: oei-backend-dev
+    environment:
+      # 数据库配置
+      DATABASE_URL: postgresql://postgres:postgres123@postgres:5432/oei_ms_dev
+      
+      # Redis配置
+      REDIS_URL: redis://:redis123@redis:6379/0
+      
+      # MQTT配置
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 1883
+      MQTT_USERNAME: ""
+      MQTT_PASSWORD: ""
+      MQTT_KEEPALIVE: 60
+      
+      # 服务器配置（开发模式）
+      HOST: 0.0.0.0
+      PORT: 8000
+      DEBUG: true
+      RELOAD: true
+      
+      # WebSocket配置
+      WEBSOCKET_PING_INTERVAL: 20
+      WEBSOCKET_PING_TIMEOUT: 10
+      
+      # JWT配置
+      SECRET_KEY: dev-secret-key-not-for-production
+      ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 1440  # 24小时，开发时更长
+      
+      # 其他配置
+      CORS_ORIGINS: http://localhost:3000,http://localhost:5173,http://localhost:8080
+    volumes:
+      - ./backend:/app  # 挂载源代码，支持热重载
+      - ./backend/logs:/app/logs
+    ports:
+      - "8001:8000"  # 避免与生产环境冲突
+    networks:
+      - oei-dev-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mosquitto:
+        condition: service_healthy
+    restart: unless-stopped
+    command: [
+      "uvicorn", "app.main:app", 
+      "--host", "0.0.0.0", 
+      "--port", "8000", 
+      "--reload",
+      "--reload-dir", "/app"
+    ]
+
+  # 数据采集模拟器
+  data-simulator-dev:
+    build:
+      context: ./simulator
+      dockerfile: Dockerfile
+    container_name: oei-simulator-dev
+    environment:
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 1883
+      SIMULATION_INTERVAL: 3  # 开发时更频繁的数据
+      SENSOR_COUNT: 15
+    volumes:
+      - ./simulator:/app  # 挂载源代码
+    networks:
+      - oei-dev-network
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # 数据库管理工具 (pgAdmin)
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: oei-pgadmin-dev
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@oei-ms.com
+      PGADMIN_DEFAULT_PASSWORD: admin123
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    volumes:
+      - pgadmin_dev_data:/var/lib/pgadmin
+    ports:
+      - "5050:80"
+    networks:
+      - oei-dev-network
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+  # Redis管理工具
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: oei-redis-commander-dev
+    environment:
+      REDIS_HOSTS: local:redis:6379:0:redis123
+      HTTP_USER: admin
+      HTTP_PASSWORD: admin123
+    ports:
+      - "8081:8081"
+    networks:
+      - oei-dev-network
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  # MQTT客户端工具
+  mqtt-explorer:
+    image: smeagolworms4/mqtt-explorer
+    container_name: oei-mqtt-explorer-dev
+    ports:
+      - "4000:4000"
+    networks:
+      - oei-dev-network
+    depends_on:
+      - mosquitto
+    restart: unless-stopped
+
+volumes:
+  postgres_dev_data:
+    driver: local
+  redis_dev_data:
+    driver: local
+  mosquitto_dev_data:
+    driver: local
+  mosquitto_dev_log:
+    driver: local
+  pgadmin_dev_data:
+    driver: local
+
+networks:
+  oei-dev-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16
