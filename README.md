@@ -391,5 +391,5 @@ A: 修改 `app/services/alarm.py` 中的报警逻辑。
 
 <div align="center">
   <p>如果这个项目对你有帮助，请给我们一个 ⭐️</p>
-  <p>Made with ❤️ by OEI-MS Team</p>
+  <p>Made with ❤️ by めぐる 毛</p>
 </div>
